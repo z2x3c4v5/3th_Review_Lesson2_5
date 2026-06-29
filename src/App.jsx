@@ -12,6 +12,8 @@ import React, { useState, useEffect, useRef } from 'react';
 //  - question / answer: 학생이 말할 영어 질문과 대답입니다.
 //  - 4단원은 answer 대신 noun(동물)만 적으면, 게임마다 1~10 숫자를
 //    무작위로 붙여 "Seven pigs." 처럼 대답을 만들어 줍니다.
+//  - 5단원은 answer 대신 food(음식)만 적으면, 게임마다 "Yes, I do." /
+//    "No, I don't." 를 무작위로 골라 대답을 만들어 줍니다. (👍/👎 표시로 힌트)
 // =================================================================
 const UNIT_POOLS = {
   '2단원': [
@@ -38,6 +40,14 @@ const UNIT_POOLS = {
     { emoji: '🦘', noun: 'kangaroos', one: 'kangaroo', question: 'How many kangaroos?' },
     { emoji: '🐯', noun: 'tigers', one: 'tiger', question: 'How many tigers?' },
   ],
+  '5단원': [
+    { emoji: '🍎', food: 'apples', question: 'Do you like apples?' },
+    { emoji: '🍌', food: 'banana', question: 'Do you like banana?' },
+    { emoji: '🍇', food: 'grapes', question: 'Do you like grapes?' },
+    { emoji: '🥗', food: 'salad', question: 'Do you like salad?' },
+    { emoji: '🍕', food: 'pizza', question: 'Do you like pizza?' },
+    { emoji: '🍨', food: 'ice cream', question: 'Do you like ice cream?' },
+  ],
 };
 
 const SENTENCES_PER_UNIT = 6;
@@ -45,17 +55,19 @@ const SENTENCES_PER_UNIT = 6;
 // 4단원(How many ~?)에서 매 게임마다 무작위로 붙일 숫자(1~10) 영어 단어
 const NUMBER_WORDS = ['One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten'];
 
-// 보드 배치 틀: START + 일반칸 18 + 액션칸 3 + FINISH = 23칸
-// (3단원 × 6문장 = 18개 표현이 'content' 자리에 들어갑니다)
+// 보드 배치 틀: START + 일반칸 24 + 액션칸 4 + FINISH = 30칸 (6열 × 5줄)
+// (4단원 × 6문장 = 24개 표현이 'content' 자리에 들어갑니다)
 const BOARD_LAYOUT = [
   { type: 'start', label: 'START' },
   ...Array(6).fill({ type: 'content' }),
   { type: 'action', action: 'forward2', label: '앞으로\n2칸 🚀' },
-  ...Array(3).fill({ type: 'content' }),
+  ...Array(5).fill({ type: 'content' }),
   { type: 'action', action: 'rest', label: '한 번\n쉬기 💤' },
-  ...Array(3).fill({ type: 'content' }),
+  ...Array(5).fill({ type: 'content' }),
   { type: 'action', action: 'back2', label: '뒤로\n2칸 🍌' },
-  ...Array(6).fill({ type: 'content' }),
+  ...Array(5).fill({ type: 'content' }),
+  { type: 'action', action: 'forward2', label: '앞으로\n2칸 🚀' },
+  ...Array(3).fill({ type: 'content' }),
   { type: 'finish', label: 'FINISH' },
 ];
 
@@ -63,6 +75,15 @@ const UNIT_COLORS = {
   '2단원': 'text-sky-700 bg-sky-50 border-sky-300',
   '3단원': 'text-emerald-700 bg-emerald-50 border-emerald-300',
   '4단원': 'text-violet-700 bg-violet-50 border-violet-300',
+  '5단원': 'text-rose-700 bg-rose-50 border-rose-300',
+};
+
+// 보드 칸 배경을 단원별로 은은하게 물들여, 진짜 보드게임의 '구역'처럼 보이게 함
+const UNIT_TINTS = {
+  '2단원': 'bg-sky-50/80 border-sky-200',
+  '3단원': 'bg-emerald-50/80 border-emerald-200',
+  '4단원': 'bg-violet-50/80 border-violet-200',
+  '5단원': 'bg-rose-50/80 border-rose-200',
 };
 
 const shuffle = (arr) => {
@@ -106,6 +127,12 @@ const buildBoard = () => {
         // 1마리일 때는 단수형으로: "One (1) pig."
         const noun = n === 1 ? (item.one || item.noun) : item.noun;
         item.answer = `${NUMBER_WORDS[n - 1]} (${n}) ${noun}.`;
+      }
+      // 5단원: food(음식)만 있으면 "Yes, I do." / "No, I don't." 를 무작위로 골라
+      // 대답을 만들고, 👍/👎 힌트(like)를 함께 저장해 어떤 대답인지 보여준다
+      if (!item.answer && item.food) {
+        item.like = Math.random() < 0.5;
+        item.answer = item.like ? 'Yes, I do.' : "No, I don't.";
       }
       return { id, type: 'normal', ...item };
     }
@@ -300,10 +327,35 @@ function CountEmoji({ emoji, count, boxClass = '', scale = 'sm' }) {
   );
 }
 
-// 카드 그림: 4단원이면 숫자만큼 동물을 나열(CountEmoji), 그 외에는 이모지(또는 이미지)
+// 5단원(Do you like ~?) 전용: 음식 그림에 👍/👎 반응을 함께 보여줘
+// 학생이 "Yes, I do." 인지 "No, I don't." 인지 한눈에 알 수 있게 한다.
+function FoodVisual({ cell, emojiClass }) {
+  const reactionSize = (emojiClass || '').includes('text-8xl')
+    ? 'text-5xl md:text-6xl'
+    : 'text-3xl md:text-4xl';
+  return (
+    <div className="relative inline-flex items-center justify-center">
+      <span className={emojiClass}>{cell.emoji}</span>
+      <span
+        className={`absolute -bottom-1 -right-2 md:-right-3 ${reactionSize} drop-shadow-md ${
+          cell.like ? 'text-emerald-600' : 'text-rose-600'
+        }`}
+        title={cell.like ? 'Yes, I do.' : "No, I don't."}
+      >
+        {cell.like ? '👍' : '👎'}
+      </span>
+    </div>
+  );
+}
+
+// 카드 그림: 4단원이면 숫자만큼 동물을 나열(CountEmoji),
+// 5단원이면 음식+반응(FoodVisual), 그 외에는 이모지(또는 이미지)
 function CardVisual({ cell, imgClass, emojiClass, countBoxClass, scale = 'sm' }) {
   if (cell && cell.count) {
     return <CountEmoji emoji={cell.emoji} count={cell.count} boxClass={countBoxClass} scale={scale} />;
+  }
+  if (cell && cell.food) {
+    return <FoodVisual cell={cell} emojiClass={emojiClass} />;
   }
   const Icon = cell && cell.icon && ICONS[cell.icon];
   if (Icon) {
@@ -393,6 +445,11 @@ const WORD_MEANING = {
   pigs: '돼지들', dogs: '개들', cats: '고양이들', ducks: '오리들',
   kangaroos: '캥거루들', tigers: '호랑이들',
   pig: '돼지', dog: '개', cat: '고양이', duck: '오리', kangaroo: '캥거루', tiger: '호랑이',
+  // 5단원 (~을(를) 좋아하니?)
+  like: '좋아하다', "don't": '~하지 않다', dont: '~하지 않다',
+  apples: '사과들', apple: '사과', banana: '바나나', bananas: '바나나들',
+  grapes: '포도', grape: '포도', salad: '샐러드', pizza: '피자',
+  ice: '얼음', cream: '크림', 'ice cream': '아이스크림',
 };
 
 const lookupMeaning = (raw) => {
@@ -416,9 +473,9 @@ const pickRandomBlanks = (segs, count) => {
   return new Set(shuffleArr(idxs).slice(0, count));
 };
 
-// 보드에서 단원별 2개씩 (총 6개) 쓰기 활동 칸을 무작위로 뽑음
+// 보드에서 단원별 2개씩 (총 8개) 쓰기 활동 칸을 무작위로 뽑음
 const pickWritingCells = (board, perUnit = 2) => {
-  const units = ['2단원', '3단원', '4단원'];
+  const units = ['2단원', '3단원', '4단원', '5단원'];
   const out = new Set();
   units.forEach((u) => {
     const ids = board
@@ -1108,8 +1165,8 @@ export default function App() {
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,_var(--tw-gradient-stops))] from-emerald-700 to-emerald-900 opacity-80 pointer-events-none"></div>
 
       <header className="w-full max-w-5xl flex flex-col md:flex-row justify-between items-center gap-4 mb-4 bg-white/95 backdrop-blur-sm p-4 rounded-2xl shadow-[0_4px_0_0_rgba(0,0,0,0.2)] z-10 border-2 border-emerald-900">
-        <h1 className="text-2xl md:text-3xl font-black text-emerald-800 uppercase tracking-wider flex items-center gap-2">
-          🎒 3학년 영어 표현 보드게임
+        <h1 className="text-2xl md:text-3xl font-black text-emerald-800 uppercase tracking-wider flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-b from-amber-100 to-amber-300 border-4 border-[#4a2e15] shadow-[0_4px_0_0_#4a2e15] [word-break:keep-all] text-center">
+          🎲 3학년 영어 표현 보드게임 🎯
         </h1>
 
         <div className="flex flex-col sm:flex-row gap-3 items-center">
@@ -1147,7 +1204,7 @@ export default function App() {
       {boardWritingMode && (
         <div className="w-full max-w-5xl bg-violet-100 border-4 border-violet-400 p-3 rounded-2xl mb-4 text-center z-10 animate-pulse">
           <p className="text-base md:text-lg font-black text-violet-800">
-            ✏️ 쓰기 활동 — 단원별 2개씩, 총 <span className="text-violet-900">6개 칸</span>에 표시된 ✏️ 쓰기 칸을 눌러보세요
+            ✏️ 쓰기 활동 — 단원별 2개씩, 총 <span className="text-violet-900">8개 칸</span>에 표시된 ✏️ 쓰기 칸을 눌러보세요
           </p>
         </div>
       )}
@@ -1212,13 +1269,34 @@ export default function App() {
 
       <div
         className={`w-full max-w-6xl p-8 md:p-14 rounded-[3rem] shadow-[0_30px_60px_-15px_rgba(0,0,0,0.8)] grid grid-cols-3 md:grid-cols-6 gap-4 md:gap-5 relative z-10 border-[16px] border-[#4a2e15] bg-[#e8dcc4] overflow-hidden ${gameState === 'lobby' ? 'mb-24' : ''}`}
+        style={{
+          borderImage:
+            'linear-gradient(135deg, #6b4423 0%, #4a2e15 25%, #5c3a1a 50%, #3a230f 75%, #6b4423 100%) 1',
+        }}
       >
+        {/* 나무 보드 위 격자 안내선 */}
         <div className="absolute inset-0 pointer-events-none opacity-20 z-0">
           <div className="absolute top-1/2 left-0 w-full h-[3px] bg-[#4a2e15]"></div>
           <div className="absolute top-0 left-1/2 w-[3px] h-full bg-[#4a2e15]"></div>
         </div>
 
         <div className="absolute inset-0 pointer-events-none opacity-[0.04] z-0 bg-[radial-gradient(#000_2px,transparent_2px)] [background-size:20px_20px]"></div>
+
+        {/* 보드 네 모서리의 장식 나사못 */}
+        {['top-2 left-2', 'top-2 right-2', 'bottom-2 left-2', 'bottom-2 right-2'].map((pos) => (
+          <div
+            key={pos}
+            className={`absolute ${pos} w-5 h-5 md:w-7 md:h-7 rounded-full bg-gradient-to-br from-[#8a6b4a] to-[#3a230f] border-2 border-[#2a1808] shadow-inner z-0 pointer-events-none flex items-center justify-center`}
+          >
+            <div className="w-3 h-[2px] md:w-4 bg-[#2a1808] rotate-45 absolute"></div>
+            <div className="w-3 h-[2px] md:w-4 bg-[#2a1808] -rotate-45 absolute"></div>
+          </div>
+        ))}
+
+        {/* 보드 한가운데 은은한 게임 엠블럼 */}
+        <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-0">
+          <div className="text-[9rem] md:text-[16rem] opacity-[0.06] select-none rotate-[-12deg]">🎲</div>
+        </div>
 
         {board.map((cell, idx) => {
           const isPlayerHere = playerPos === idx;
@@ -1229,11 +1307,10 @@ export default function App() {
           let cellStyle = '';
 
           if (cell.type === 'normal') {
-            const writingHi =
-              boardWritingMode && writingCellIds.has(idx)
-                ? ' bg-violet-50 border-violet-400 writing-glow ring-2 ring-violet-300'
-                : '';
-            cellStyle = `${baseStyle} bg-[#fdfbf7] border-[3px] border-[#d4bca3] shadow-[0_8px_0_0_#bca38f,0_15px_10px_rgba(0,0,0,0.2)] cursor-pointer hover:border-emerald-400 hover:shadow-[0_8px_0_0_#10b981,0_15px_10px_rgba(0,0,0,0.2)]${writingHi}`;
+            const isWriteHi = boardWritingMode && writingCellIds.has(idx);
+            const tint = UNIT_TINTS[cell.unit] || 'bg-[#fdfbf7] border-[#d4bca3]';
+            const writingHi = isWriteHi ? ' writing-glow ring-2 ring-violet-300' : '';
+            cellStyle = `${baseStyle} border-[3px] ${isWriteHi ? 'bg-violet-50 border-violet-400' : tint} shadow-[0_8px_0_0_#bca38f,0_15px_10px_rgba(0,0,0,0.2)] cursor-pointer hover:border-emerald-400 hover:shadow-[0_8px_0_0_#10b981,0_15px_10px_rgba(0,0,0,0.2)]${writingHi}`;
           } else if (cell.type === 'start') {
             cellStyle = `${baseStyle} bg-gradient-to-b from-amber-200 to-amber-400 border-[3px] border-amber-500 shadow-[0_8px_0_0_#b45309,0_15px_10px_rgba(0,0,0,0.2)]`;
           } else if (cell.type === 'finish') {
@@ -1294,9 +1371,18 @@ export default function App() {
                 </div>
               )}
 
+              {cell.type === 'finish' && (
+                <div className="absolute inset-1 rounded-xl pointer-events-none opacity-25 z-0 [background-image:repeating-conic-gradient(#000_0_25%,transparent_0_50%)] [background-size:24px_24px]"></div>
+              )}
+
               {(cell.type === 'start' || cell.type === 'finish') && (
-                <div className="font-black text-xl md:text-2xl text-white tracking-wider drop-shadow-md bg-black/20 px-3 py-1 rounded-lg border border-white/30">
-                  {cell.label}
+                <div className="flex flex-col items-center gap-1 z-10">
+                  <span className="text-3xl md:text-4xl drop-shadow-md">
+                    {cell.type === 'start' ? '🚩' : '🏁'}
+                  </span>
+                  <span className="font-black text-lg md:text-2xl text-white tracking-wider drop-shadow-md bg-black/25 px-3 py-1 rounded-lg border border-white/40">
+                    {cell.label}
+                  </span>
                 </div>
               )}
 
