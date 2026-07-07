@@ -52,6 +52,9 @@ const UNIT_POOLS = {
 
 const SENTENCES_PER_UNIT = 6;
 
+// 선택할 수 있는 전체 단원 목록
+const ALL_UNITS = Object.keys(UNIT_POOLS);
+
 // 4단원(How many ~?)에서 매 게임마다 무작위로 붙일 숫자(1~10) 영어 단어
 const NUMBER_WORDS = ['One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten'];
 
@@ -71,6 +74,9 @@ const BOARD_LAYOUT = [
   { type: 'finish', label: 'FINISH' },
 ];
 
+// 보드의 '일반칸(그림칸)' 개수 — 선택 단원에 이 칸들을 균등 배분한다
+const CONTENT_CELL_COUNT = BOARD_LAYOUT.filter((l) => l.type === 'content').length;
+
 const UNIT_COLORS = {
   '2단원': 'text-sky-700 bg-sky-50 border-sky-300',
   '3단원': 'text-emerald-700 bg-emerald-50 border-emerald-300',
@@ -80,10 +86,10 @@ const UNIT_COLORS = {
 
 // 보드 칸 배경을 단원별로 은은하게 물들여, 진짜 보드게임의 '구역'처럼 보이게 함
 const UNIT_TINTS = {
-  '2단원': 'bg-sky-50/80 border-sky-200',
-  '3단원': 'bg-emerald-50/80 border-emerald-200',
-  '4단원': 'bg-violet-50/80 border-violet-200',
-  '5단원': 'bg-rose-50/80 border-rose-200',
+  '2단원': 'bg-sky-100/80 border-sky-300',
+  '3단원': 'bg-emerald-100/80 border-emerald-300',
+  '4단원': 'bg-fuchsia-100/80 border-fuchsia-300',
+  '5단원': 'bg-rose-100/80 border-rose-300',
 };
 
 const shuffle = (arr) => {
@@ -105,11 +111,20 @@ const pickForUnit = (pool, n) => {
   return shuffle(result.slice(0, n));
 };
 
-// 매 게임마다 단원별 6문장을 뽑아 24개 일반칸에 무작위로 배치한 보드를 생성
-const buildBoard = () => {
+// 매 게임마다 (선택한 단원의) 표현을 일반칸에 균등 배분해 보드를 생성한다.
+// selectedUnits를 주면 그 단원들로만, 없으면 전체 단원으로 채운다.
+// 표현이 배정 칸수보다 적으면 pickForUnit이 자동 반복해 채운다(복습 반복 효과).
+const buildBoard = (selectedUnits) => {
+  const units = (selectedUnits && selectedUnits.length
+    ? selectedUnits.filter((u) => UNIT_POOLS[u])
+    : ALL_UNITS);
+  const list = units.length ? units : ALL_UNITS;
+  const per = Math.floor(CONTENT_CELL_COUNT / list.length);
+  const extra = CONTENT_CELL_COUNT - per * list.length; // 남는 칸은 앞 단원부터 한 칸씩 더
   const picked = [];
-  Object.entries(UNIT_POOLS).forEach(([unit, pool]) => {
-    pickForUnit(pool, SENTENCES_PER_UNIT).forEach((item) => picked.push({ ...item, unit }));
+  list.forEach((unit, i) => {
+    const n = per + (i < extra ? 1 : 0);
+    pickForUnit(UNIT_POOLS[unit], n).forEach((item) => picked.push({ ...item, unit }));
   });
   const contentQueue = shuffle(picked);
 
@@ -608,6 +623,18 @@ export default function App() {
   const finishedSavedRef = useRef(false); // 게임 종료 시 기록 저장을 한 번만
   const bestBeforeRef = useRef(0); // 이번 게임 시작 전의 최고 점수(성적표 비교용)
 
+  // --- 단원 선택(집중 복습) ---
+  const [selectedUnits, setSelectedUnits] = useState(ALL_UNITS); // 보드에 넣을 단원들
+
+  // --- 활동 방법 안내 팝업 (첫 접속 시 자동 열림) ---
+  const [showGuide, setShowGuide] = useState(() => {
+    try { return !localStorage.getItem('review3_guide_seen'); } catch (e) { return true; }
+  });
+
+  // --- 칸별 마이크 녹음(정확도 측정) ---
+  const [previewMic, setPreviewMic] = useState(null); // { listening, kind, pct, label } | null
+  const previewRecRef = useRef(null);
+
   const [currentTask, setCurrentTask] = useState(null);
   const [isListening, setIsListening] = useState(false);
   const [spokenText, setSpokenText] = useState('');
@@ -1082,6 +1109,7 @@ export default function App() {
 
     setWordHint(null);
     setWriteRevealed(false);
+    setPreviewMic(null);
     setPreviewCell(cell);
 
     if (boardWritingMode && writingCellIds.has(cell.id)) {
@@ -1098,6 +1126,10 @@ export default function App() {
   };
 
   const closePreview = () => {
+    if (previewRecRef.current) {
+      try { previewRecRef.current.abort(); } catch (e) { /* 무시 */ }
+    }
+    setPreviewMic(null);
     setPreviewCell(null);
     setWordHint(null);
     setWriteMode(false);
@@ -1128,7 +1160,7 @@ export default function App() {
   };
 
   const resetGame = () => {
-    setBoard(buildBoard());
+    setBoard(buildBoard(selectedUnits));
     setPlayerPos(0);
     setAiPos(0);
     setPlayerRest(false);
@@ -1155,6 +1187,7 @@ export default function App() {
     setReviewList([]);
     setReviewDeck(null);
     setWordFeedback(null);
+    setPreviewMic(null);
   };
 
   const toggleBoardWriting = () => {
@@ -1170,6 +1203,64 @@ export default function App() {
   const handleModeChange = (mode) => {
     // 모드만 바꾸고 보드 순서/진행 상태는 유지(원치 않는 재배치 방지)
     setGameMode(mode);
+  };
+
+  // 단원 선택 토글(로비에서만) — 최소 2단원은 유지하고, 바꾸면 보드를 새로 짠다
+  const toggleUnit = (unit) => {
+    const picked = selectedUnits.includes(unit)
+      ? selectedUnits.filter((u) => u !== unit)
+      : [...selectedUnits, unit];
+    const next = ALL_UNITS.filter((u) => picked.includes(u));
+    if (next.length < 2) return; // 최소 2단원 강제
+    setSelectedUnits(next);
+    setBoard(buildBoard(next));
+  };
+
+  const closeGuide = () => {
+    try { localStorage.setItem('review3_guide_seen', '1'); } catch (e) { /* 무시 */ }
+    setShowGuide(false);
+  };
+
+  // 칸별 마이크: 학생이 말한 문장이 목표 문장과 얼마나 맞는지 정확도(%)로 계산
+  const scoreAccuracy = (transcripts, targetText) => {
+    const required = contentTokens(targetText.replace(/\s*\([^)]*\)/g, ' '));
+    if (!required.length) return 100;
+    let spokenToks = [];
+    transcripts.forEach((t) => { spokenToks = spokenToks.concat(tokenize(t)); });
+    const sc = spokenToks.join('');
+    const hit = required.filter((t) => tokenMatches(t, spokenToks, sc)).length;
+    return Math.round((hit / required.length) * 100);
+  };
+
+  const startPreviewMic = (kind) => {
+    if (!previewCell) return;
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      alert('이 브라우저는 음성 인식을 지원하지 않습니다. Chrome을 사용해주세요.');
+      return;
+    }
+    if (previewRecRef.current) {
+      try { previewRecRef.current.abort(); } catch (e) { /* 무시 */ }
+    }
+    const target = kind === 'question' ? previewCell.question : previewCell.answer;
+    const rec = new SpeechRecognition();
+    rec.lang = 'en-US';
+    rec.continuous = false;
+    rec.interimResults = false;
+    rec.maxAlternatives = 5;
+    setPreviewMic({ listening: true, kind, pct: null, label: '' });
+    rec.onresult = (e) => {
+      const r = e.results[0];
+      const ts = [];
+      for (let i = 0; i < r.length; i++) ts.push(r[i].transcript);
+      const pct = scoreAccuracy(ts, target);
+      const label = pct >= 80 ? '훌륭해요! 🎉' : pct >= 50 ? '좋아요! 👍' : '다시 해볼까요? 💪';
+      setPreviewMic({ listening: false, kind, pct, label });
+    };
+    rec.onerror = () => setPreviewMic({ listening: false, kind, pct: null, label: '마이크 오류 — 다시 눌러주세요 🎤' });
+    rec.onend = () => setPreviewMic((m) => (m && m.listening ? { ...m, listening: false } : m));
+    previewRecRef.current = rec;
+    try { rec.start(); } catch (e) { /* 무시 */ }
   };
 
   const renderDots = (num) => {
@@ -1240,9 +1331,21 @@ export default function App() {
 
   return (
     <div
-      className="min-h-screen bg-emerald-800 text-gray-800 p-4 flex flex-col items-center relative overflow-hidden"
+      className="min-h-screen bg-gradient-to-b from-sky-400 via-sky-500 to-blue-800 text-gray-800 p-4 flex flex-col items-center relative overflow-hidden"
       style={appStyle}
     >
+      {/* ☀️🏖️ 여름 바다 테마 장식 (클릭 방해 없음) */}
+      <div className="pointer-events-none select-none absolute inset-0 z-0 overflow-hidden">
+        <div className="absolute -top-6 -left-4 text-8xl md:text-9xl drop-shadow-lg animate-pulse">☀️</div>
+        <div className="absolute top-24 right-6 text-5xl md:text-7xl drop-shadow-md">⛱️</div>
+        <div className="absolute top-1/3 left-4 text-4xl md:text-6xl drop-shadow-md">🍉</div>
+        <div className="absolute top-1/2 right-10 text-4xl md:text-6xl drop-shadow-md">🏄</div>
+        <div className="absolute bottom-24 left-10 text-4xl md:text-6xl drop-shadow-md">🐚</div>
+        <div className="absolute bottom-28 right-16 text-4xl md:text-6xl drop-shadow-md">🐠</div>
+        <div className="absolute bottom-0 left-0 w-full text-3xl md:text-5xl leading-none whitespace-nowrap overflow-hidden opacity-90">
+          🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊
+        </div>
+      </div>
       <style>{`
         @import url('https://hangeul.pstatic.net/hangeul_static/css/nanum-square-round.css');
 
@@ -1291,39 +1394,48 @@ export default function App() {
         .face-bottom { transform: rotateX(-90deg) translateZ(64px); }
       `}</style>
 
-      <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,_var(--tw-gradient-stops))] from-emerald-700 to-emerald-900 opacity-80 pointer-events-none"></div>
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,_var(--tw-gradient-stops))] from-sky-400 to-blue-900 opacity-70 pointer-events-none"></div>
 
-      <header className="w-full max-w-5xl flex flex-col md:flex-row justify-between items-center gap-4 mb-4 bg-white/95 backdrop-blur-sm p-4 rounded-2xl shadow-[0_4px_0_0_rgba(0,0,0,0.2)] z-10 border-2 border-emerald-900">
-        <h1 className="text-2xl md:text-3xl font-black text-emerald-800 uppercase tracking-wider flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-b from-amber-100 to-amber-300 border-4 border-[#4a2e15] shadow-[0_4px_0_0_#4a2e15] [word-break:keep-all] text-center">
-          🎲 3학년 영어 표현 보드게임 🎯
+      <header className="w-full max-w-6xl flex flex-col lg:flex-row lg:justify-between lg:items-center gap-4 mb-4 bg-white/95 backdrop-blur-sm p-4 rounded-2xl shadow-[0_4px_0_0_rgba(0,0,0,0.2)] z-10 border-2 border-sky-700">
+        <h1 className="text-lg md:text-2xl font-black text-sky-900 flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-b from-sky-100 to-cyan-200 border-4 border-sky-700 shadow-[0_4px_0_0_#0369a1] [word-break:keep-all] text-center leading-tight">
+          🏖️ 3학년 2-5단원 주요표현 보드게임 <span className="text-cyan-700 whitespace-nowrap">with Writing</span>
         </h1>
 
-        <div className="flex flex-col sm:flex-row gap-3 items-center">
-          <div className="flex bg-gray-200 p-1 rounded-xl shadow-inner">
+        <div className="flex flex-col gap-2 items-stretch w-full lg:w-auto">
+          <div className="flex flex-wrap gap-2 items-center justify-center">
+            <div className="flex bg-gray-200 p-1 rounded-xl shadow-inner">
+              <button
+                onClick={() => handleModeChange('answerOnly')}
+                className={`px-4 py-2 rounded-lg font-bold transition-all text-sm md:text-base whitespace-nowrap ${gameMode === 'answerOnly' ? 'bg-white shadow-sm text-sky-800 border border-gray-300' : 'text-gray-500 hover:text-gray-700'}`}
+              >
+                대답만 하기
+              </button>
+              <button
+                onClick={() => handleModeChange('qna')}
+                className={`px-4 py-2 rounded-lg font-bold transition-all text-sm md:text-base whitespace-nowrap ${gameMode === 'qna' ? 'bg-white shadow-sm text-sky-800 border border-gray-300' : 'text-gray-500 hover:text-gray-700'}`}
+              >
+                질문&대답 같이
+              </button>
+            </div>
+
             <button
-              onClick={() => handleModeChange('answerOnly')}
-              className={`px-4 py-2 rounded-lg font-bold transition-all text-sm md:text-base ${gameMode === 'answerOnly' ? 'bg-white shadow-sm text-emerald-800 border border-gray-300' : 'text-gray-500 hover:text-gray-700'}`}
+              onClick={() => setShowGuide(true)}
+              className="px-5 py-2 rounded-xl font-bold transition-all whitespace-nowrap bg-cyan-500 hover:bg-cyan-400 text-white shadow-[0_4px_0_0_rgba(14,116,144,1)] active:shadow-[0_0px_0_0_rgba(14,116,144,1)] active:translate-y-1"
             >
-              대답만 하기
+              📖 활동 방법
             </button>
+
             <button
-              onClick={() => handleModeChange('qna')}
-              className={`px-4 py-2 rounded-lg font-bold transition-all text-sm md:text-base ${gameMode === 'qna' ? 'bg-white shadow-sm text-emerald-800 border border-gray-300' : 'text-gray-500 hover:text-gray-700'}`}
+              onClick={toggleBoardWriting}
+              className={`px-5 py-2 rounded-xl font-bold transition-all whitespace-nowrap shadow-[0_4px_0_0_rgba(124,58,237,1)] active:shadow-[0_0px_0_0_rgba(124,58,237,1)] active:translate-y-1 ${boardWritingMode ? 'bg-violet-600 text-white' : 'bg-violet-500 hover:bg-violet-400 text-white'}`}
             >
-              질문&대답 같이
+              {boardWritingMode ? '✏️ 쓰기 활동 끄기' : '✏️ 쓰기 활동'}
             </button>
           </div>
 
           <button
-            onClick={toggleBoardWriting}
-            className={`px-5 py-2 rounded-xl font-bold transition-all whitespace-nowrap shadow-[0_4px_0_0_rgba(124,58,237,1)] active:shadow-[0_0px_0_0_rgba(124,58,237,1)] active:translate-y-1 ${boardWritingMode ? 'bg-violet-600 text-white' : 'bg-violet-500 hover:bg-violet-400 text-white'}`}
-          >
-            {boardWritingMode ? '✏️ 쓰기 활동 끄기' : '✏️ 쓰기 활동'}
-          </button>
-
-          <button
             onClick={resetGame}
-            className="px-5 py-2 bg-amber-500 hover:bg-amber-400 text-amber-950 rounded-xl font-bold transition-all shadow-[0_4px_0_0_rgba(180,83,9,1)] active:shadow-[0_0px_0_0_rgba(180,83,9,1)] active:translate-y-1 whitespace-nowrap"
+            className="w-full px-5 py-2 bg-amber-500 hover:bg-amber-400 text-amber-950 rounded-xl font-bold transition-all shadow-[0_4px_0_0_rgba(180,83,9,1)] active:shadow-[0_0px_0_0_rgba(180,83,9,1)] active:translate-y-1 whitespace-nowrap"
           >
             처음부터 다시 하기
           </button>
@@ -1339,12 +1451,35 @@ export default function App() {
       )}
 
       {gameState === 'lobby' && (
-        <div className="w-full max-w-5xl mb-4 z-10 space-y-3">
-          <div className="bg-white/95 p-4 rounded-2xl shadow-md text-center border-4 border-emerald-400 animate-pulse">
-            <h2 className="text-xl md:text-2xl font-black text-emerald-700">
+        <div className="w-full max-w-6xl mb-4 z-10 space-y-3">
+          <div className="bg-white/95 p-4 rounded-2xl shadow-md text-center border-4 border-sky-400 animate-pulse">
+            <h2 className="text-xl md:text-2xl font-black text-sky-700">
               💡 그림을 클릭하면 질문과 대답 문장이 나와요. 듣고 따라 읽고 공책에 써보며 연습해봅시다!
             </h2>
           </div>
+
+          <div className="bg-white/95 p-3 rounded-2xl shadow-md border-4 border-cyan-300">
+            <p className="text-sm md:text-base font-black text-cyan-800 mb-2 text-center">🎯 집중 복습할 단원을 골라요 (최소 2개)</p>
+            <div className="flex flex-wrap justify-center gap-2">
+              {ALL_UNITS.map((u) => {
+                const on = selectedUnits.includes(u);
+                return (
+                  <button
+                    key={u}
+                    onClick={() => toggleUnit(u)}
+                    className={`px-4 py-2 rounded-xl font-black border-2 transition-all ${on ? 'bg-cyan-500 text-white border-cyan-600 shadow-[0_3px_0_0_rgba(14,116,144,1)]' : 'bg-white text-cyan-700 border-cyan-200 hover:bg-cyan-50'}`}
+                  >
+                    {on ? '✅ ' : ''}{u}
+                  </button>
+                );
+              })}
+            </div>
+            <p className="text-xs font-bold text-center mt-2 text-slate-500">
+              선택한 단원으로 보드 {CONTENT_CELL_COUNT}칸을 골고루 채워요
+              {selectedUnits.length <= 2 ? ' · ⚠️ 최소 2단원은 유지돼요' : ''}
+            </p>
+          </div>
+
           <div className="bg-white/95 p-3 rounded-2xl shadow-md border-4 border-amber-300 flex flex-wrap items-center justify-center gap-3 md:gap-5">
             <span className="text-base md:text-lg font-black text-amber-700 bg-amber-50 px-4 py-2 rounded-xl border-2 border-amber-200">
               ⭐ 지금까지 모은 별 <span className="text-amber-900">{progress.totalStars}</span>
@@ -1416,20 +1551,21 @@ export default function App() {
         </div>
       )}
 
+      <div className={`w-full max-w-6xl overflow-x-auto z-10 ${gameState === 'lobby' ? 'mb-24' : ''}`}>
       <div
-        className={`w-full max-w-6xl p-8 md:p-14 rounded-[3rem] shadow-[0_30px_60px_-15px_rgba(0,0,0,0.8)] grid grid-cols-3 md:grid-cols-6 gap-4 md:gap-5 relative z-10 border-[16px] border-[#4a2e15] bg-[#e8dcc4] overflow-hidden ${gameState === 'lobby' ? 'mb-24' : ''}`}
+        className="min-w-[680px] p-8 md:p-14 rounded-[3rem] shadow-[0_30px_60px_-15px_rgba(0,0,0,0.8)] grid grid-cols-6 gap-x-8 gap-y-10 md:gap-x-10 md:gap-y-12 relative border-[16px] border-[#4a2e15] bg-[#e8dcc4]"
         style={{
           borderImage:
             'linear-gradient(135deg, #6b4423 0%, #4a2e15 25%, #5c3a1a 50%, #3a230f 75%, #6b4423 100%) 1',
         }}
       >
-        {/* 나무 보드 위 격자 안내선 */}
-        <div className="absolute inset-0 pointer-events-none opacity-20 z-0">
-          <div className="absolute top-1/2 left-0 w-full h-[3px] bg-[#4a2e15]"></div>
-          <div className="absolute top-0 left-1/2 w-[3px] h-full bg-[#4a2e15]"></div>
-        </div>
-
         <div className="absolute inset-0 pointer-events-none opacity-[0.04] z-0 bg-[radial-gradient(#000_2px,transparent_2px)] [background-size:20px_20px]"></div>
+
+        {/* 여름 바다 모서리 장식 */}
+        <div className="absolute top-3 left-10 text-2xl md:text-4xl z-0 pointer-events-none select-none">🐚</div>
+        <div className="absolute top-3 right-10 text-2xl md:text-4xl z-0 pointer-events-none select-none">⭐</div>
+        <div className="absolute bottom-3 left-10 text-2xl md:text-4xl z-0 pointer-events-none select-none">🦀</div>
+        <div className="absolute bottom-3 right-10 text-2xl md:text-4xl z-0 pointer-events-none select-none">🐠</div>
 
         {/* 보드 네 모서리의 장식 나사못 */}
         {['top-2 left-2', 'top-2 right-2', 'bottom-2 left-2', 'bottom-2 right-2'].map((pos) => (
@@ -1451,6 +1587,15 @@ export default function App() {
           const isPlayerHere = playerPos === idx;
           const isAiHere = aiPos === idx;
 
+          // 뱀 모양(지그재그) 배치: 홀수 줄은 오른→왼으로 뒤집어 START→FINISH가 한 길로 이어지게 함
+          // (칸 번호·이동 로직은 그대로, 화면 위치만 바꿈)
+          const row = Math.floor(idx / 6);
+          const col = idx % 6;
+          const displayCol = row % 2 === 0 ? col : 5 - col;
+          const cellPlace = { gridColumnStart: displayCol + 1, gridRowStart: row + 1 };
+          const isLastCell = idx === board.length - 1;
+          const arrowDir = isLastCell ? null : col === 5 ? 'down' : row % 2 === 0 ? 'right' : 'left';
+
           let baseStyle =
             'w-full h-32 md:h-[184px] rounded-2xl flex flex-col items-center justify-center relative transform transition-all duration-300 hover:-translate-y-2 z-10 group';
           let cellStyle = '';
@@ -1459,7 +1604,7 @@ export default function App() {
             const isWriteHi = boardWritingMode && writingCellIds.has(idx);
             const tint = UNIT_TINTS[cell.unit] || 'bg-[#fdfbf7] border-[#d4bca3]';
             const writingHi = isWriteHi ? ' writing-glow ring-2 ring-violet-300' : '';
-            cellStyle = `${baseStyle} border-[3px] ${isWriteHi ? 'bg-violet-50 border-violet-400' : tint} shadow-[0_8px_0_0_#bca38f,0_15px_10px_rgba(0,0,0,0.2)] cursor-pointer hover:border-emerald-400 hover:shadow-[0_8px_0_0_#10b981,0_15px_10px_rgba(0,0,0,0.2)]${writingHi}`;
+            cellStyle = `${baseStyle} border-[3px] ${isWriteHi ? 'bg-violet-50 border-violet-400' : tint} shadow-[0_8px_0_0_#bca38f,0_15px_10px_rgba(0,0,0,0.2)] cursor-pointer hover:border-sky-400 hover:shadow-[0_8px_0_0_#0ea5e9,0_15px_10px_rgba(0,0,0,0.2)]${writingHi}`;
           } else if (cell.type === 'start') {
             cellStyle = `${baseStyle} bg-gradient-to-b from-amber-200 to-amber-400 border-[3px] border-amber-500 shadow-[0_8px_0_0_#b45309,0_15px_10px_rgba(0,0,0,0.2)]`;
           } else if (cell.type === 'finish') {
@@ -1467,15 +1612,24 @@ export default function App() {
           } else if (cell.type === 'action') {
             let actionColor =
               cell.action === 'rest'
-                ? 'bg-blue-100 border-blue-300 shadow-[0_8px_0_0_#93c5fd,0_15px_10px_rgba(0,0,0,0.2)]'
+                ? 'bg-blue-100 border-blue-400 shadow-[0_8px_0_0_#93c5fd,0_15px_10px_rgba(0,0,0,0.2)]'
                 : cell.action === 'forward2'
-                  ? 'bg-green-100 border-green-300 shadow-[0_8px_0_0_#86efac,0_15px_10px_rgba(0,0,0,0.2)]'
-                  : 'bg-red-100 border-red-300 shadow-[0_8px_0_0_#fca5a5,0_15px_10px_rgba(0,0,0,0.2)]';
-            cellStyle = `${baseStyle} ${actionColor} border-[3px]`;
+                  ? 'bg-green-100 border-green-400 shadow-[0_8px_0_0_#86efac,0_15px_10px_rgba(0,0,0,0.2)]'
+                  : 'bg-red-100 border-red-400 shadow-[0_8px_0_0_#fca5a5,0_15px_10px_rgba(0,0,0,0.2)]';
+            cellStyle = `${baseStyle} ${actionColor} border-[3px] border-dashed`;
           }
 
           return (
-            <div key={idx} className={cellStyle} onClick={() => handleCellClick(cell)}>
+            <div key={idx} className={cellStyle} style={cellPlace} onClick={() => handleCellClick(cell)}>
+              {arrowDir === 'right' && (
+                <div className="absolute top-1/2 -right-6 md:-right-8 -translate-y-1/2 text-3xl md:text-5xl text-white drop-shadow-[0_2px_2px_rgba(0,0,0,0.45)] z-20 pointer-events-none">▶</div>
+              )}
+              {arrowDir === 'left' && (
+                <div className="absolute top-1/2 -left-6 md:-left-8 -translate-y-1/2 text-3xl md:text-5xl text-white drop-shadow-[0_2px_2px_rgba(0,0,0,0.45)] z-20 pointer-events-none">◀</div>
+              )}
+              {arrowDir === 'down' && (
+                <div className="absolute -bottom-9 md:-bottom-11 left-1/2 -translate-x-1/2 text-3xl md:text-5xl text-white drop-shadow-[0_2px_2px_rgba(0,0,0,0.45)] z-20 pointer-events-none">▼</div>
+              )}
               <div className="absolute -top-4 -left-2 md:-top-6 md:-left-4 flex gap-1 z-30 w-full px-1">
                 {isPlayerHere && (
                   <div className="w-12 h-12 md:w-14 md:h-14 bg-gradient-to-br from-blue-400 to-blue-700 rounded-full border-[3px] border-white shadow-[0_8px_10px_rgba(0,0,0,0.5),inset_0_4px_4px_rgba(255,255,255,0.4)] flex items-center justify-center text-2xl md:text-3xl animate-bounce z-40">
@@ -1547,6 +1701,7 @@ export default function App() {
           );
         })}
       </div>
+      </div>
 
       {gameState === 'lobby' && (
         <div className="fixed bottom-10 left-1/2 -translate-x-1/2 z-50">
@@ -1561,6 +1716,47 @@ export default function App() {
           >
             🚀 게임 시작하기!
           </button>
+        </div>
+      )}
+
+      {showGuide && (
+        <div
+          className="fixed inset-0 bg-black/70 flex items-center justify-center z-[95] p-4 backdrop-blur-sm"
+          onClick={closeGuide}
+        >
+          <div
+            className="bg-white rounded-[2rem] p-6 md:p-8 max-w-lg w-full shadow-2xl border-8 border-cyan-400 relative max-h-[90vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button onClick={closeGuide} className="absolute top-3 right-4 text-slate-400 hover:text-slate-700 text-2xl font-black">✕</button>
+            <h2 className="text-2xl md:text-3xl font-black text-cyan-700 text-center mb-1">🏖️ 활동 방법</h2>
+            <p className="text-center text-sm font-bold text-slate-500 mb-5">이렇게 놀면서 영어를 익혀요!</p>
+            <div className="space-y-3 text-left">
+              {[
+                { n: '1', c: '🔊', t: '듣고 따라 말하기', d: '그림 칸을 누르면 문장이 나와요. 듣고 큰 소리로 따라 읽어요.' },
+                { n: '2', c: '🎤', t: '대답만 하기 모드', d: 'AI 질문을 듣고 대답만 말해요. 마이크를 누르고 또박또박!' },
+                { n: '3', c: '💬', t: '질문&대답 같이 모드', d: '그림에 맞는 질문과 대답을 스스로 만들어 말해요.' },
+                { n: '4', c: '✏️', t: '쓰기 활동', d: "'쓰기 활동'을 켜고 표시된 칸을 눌러 공책에 문장을 써요." },
+              ].map((s) => (
+                <div key={s.n} className="flex items-start gap-3 bg-cyan-50 border-2 border-cyan-100 rounded-2xl p-3">
+                  <div className="shrink-0 w-9 h-9 rounded-full bg-cyan-500 text-white font-black flex items-center justify-center">{s.n}</div>
+                  <div>
+                    <p className="font-black text-slate-800">{s.c} {s.t}</p>
+                    <p className="text-sm font-bold text-slate-600">{s.d}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <p className="text-center text-sm font-bold text-amber-700 bg-amber-50 border-2 border-amber-200 rounded-xl py-2 mt-4">
+              ⭐ 정확히 말해 통과하면 별을 모으고, 게임이 끝나면 성적표에서 확인해요!
+            </p>
+            <button
+              onClick={closeGuide}
+              className="w-full mt-4 py-3 bg-cyan-500 hover:bg-cyan-400 text-white rounded-2xl font-black text-lg border-b-4 border-cyan-700 active:border-b-0 active:translate-y-1"
+            >
+              알겠어요! 시작할게요 🚀
+            </button>
+          </div>
         </div>
       )}
 
@@ -1639,6 +1835,52 @@ export default function App() {
                   >
                     🔊 다시 듣기
                   </button>
+                </div>
+
+                {/* 🎤 칸별 마이크: 직접 말하고 정확도(%) 확인 */}
+                <div className="mt-4 bg-sky-50 border-2 border-sky-200 rounded-2xl p-4">
+                  <p className="text-xs font-black text-sky-600 uppercase tracking-wide mb-2">🎤 직접 말해보기 (정확도 측정)</p>
+                  <div className="flex flex-wrap justify-center gap-2">
+                    {!previewCell.single && (
+                      <button
+                        onClick={() => startPreviewMic('question')}
+                        disabled={previewMic?.listening}
+                        className="px-4 py-2 rounded-full font-black text-white bg-blue-500 hover:bg-blue-400 disabled:opacity-50 shadow-[0_3px_0_0_rgba(37,99,235,1)] active:shadow-none active:translate-y-0.5 transition-all"
+                      >
+                        {previewMic?.listening && previewMic.kind === 'question' ? '🎙️ 듣는 중…' : '🎤 질문 말하기'}
+                      </button>
+                    )}
+                    <button
+                      onClick={() => startPreviewMic('answer')}
+                      disabled={previewMic?.listening}
+                      className="px-4 py-2 rounded-full font-black text-white bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 shadow-[0_3px_0_0_rgba(5,150,105,1)] active:shadow-none active:translate-y-0.5 transition-all"
+                    >
+                      {previewMic?.listening && previewMic.kind === 'answer'
+                        ? '🎙️ 듣는 중…'
+                        : previewCell.single ? '🎤 문장 말하기' : '🎤 대답 말하기'}
+                    </button>
+                  </div>
+                  {previewMic && previewMic.pct !== null && (
+                    <div className="mt-3">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-sm font-black text-slate-700">
+                          {previewMic.kind === 'question' ? '질문' : previewCell.single ? '문장' : '대답'} 정확도
+                        </span>
+                        <span className={`text-lg font-black ${previewMic.pct >= 80 ? 'text-emerald-600' : previewMic.pct >= 50 ? 'text-amber-600' : 'text-rose-600'}`}>
+                          {previewMic.pct}% · {previewMic.label}
+                        </span>
+                      </div>
+                      <div className="w-full h-4 bg-slate-200 rounded-full overflow-hidden">
+                        <div
+                          className="h-full rounded-full transition-all duration-500"
+                          style={{ width: `${previewMic.pct}%`, background: previewMic.pct >= 80 ? '#10b981' : previewMic.pct >= 50 ? '#f59e0b' : '#ef4444' }}
+                        />
+                      </div>
+                    </div>
+                  )}
+                  {previewMic && previewMic.pct === null && !previewMic.listening && previewMic.label && (
+                    <p className="text-sm font-bold text-rose-500 mt-2 text-center">{previewMic.label}</p>
+                  )}
                 </div>
               </>
             ) : (
