@@ -142,6 +142,45 @@ const buildBoard = () => {
 
 const RPS_EMOJI = { rock: '✊', paper: '🖐️', scissors: '✌️' };
 
+// --- 학습 기록(브라우저에 저장) ---------------------------------------
+// 누적 별·최고 점수·오답노트를 localStorage에 저장해 탭을 닫아도 유지한다.
+const LS_KEY = 'review3_progress_v1';
+
+const loadProgress = () => {
+  try {
+    const p = JSON.parse(localStorage.getItem(LS_KEY) || '{}');
+    return {
+      totalStars: p.totalStars || 0,
+      bestScore: p.bestScore || 0,
+      wrongNote: Array.isArray(p.wrongNote) ? p.wrongNote : [],
+    };
+  } catch (e) {
+    return { totalStars: 0, bestScore: 0, wrongNote: [] };
+  }
+};
+
+const saveProgress = (p) => {
+  try {
+    localStorage.setItem(LS_KEY, JSON.stringify(p));
+  } catch (e) {
+    // 저장 실패는 무시(진행에는 영향 없음)
+  }
+};
+
+// 오답노트에 저장할 최소 정보만 추린다(그림 재현용 emoji/icon/count/food 포함)
+const toNote = (cell) => ({
+  key: cell.answer,
+  unit: cell.unit,
+  question: cell.question,
+  answer: cell.answer,
+  single: !!cell.single,
+  emoji: cell.emoji,
+  icon: cell.icon || null,
+  count: cell.count || null,
+  food: cell.food || null,
+  like: cell.food ? !!cell.like : null,
+});
+
 // --- 음성 정답 인식(너그러운 매칭) ---------------------------------
 // 학생이 문장을 살짝 다르게 말해도 정답으로 인정합니다.
 //  · 관사/대명사 등 기능어(the, a, I, my ...)는 무시
@@ -228,6 +267,43 @@ const bestTranscript = (transcripts, required) => {
     if (score > bestScore) { bestScore = score; best = t; }
   });
   return best;
+};
+
+// 발음 피드백: 목표 문장을 단어별로 쪼개, 학생이 맞춘/놓친 핵심 단어를 표시할 수 있게
+// { lines: [[{type,text,isKey,matched,norm,core}...]], missed: [{norm,core}...] } 를 돌려준다.
+const analyzeSpoken = (transcripts, task) => {
+  let spokenToks = [];
+  transcripts.forEach((t) => { spokenToks = spokenToks.concat(tokenize(t)); });
+  const spokenConcat = spokenToks.join('');
+  const targets = task.single
+    ? [task.answer]
+    : task.mode === 'qna'
+      ? [task.question, task.answer]
+      : [task.answer];
+  const lines = targets.map((sentence) =>
+    sentence
+      .split(/(\s+)/)
+      .filter((w) => w !== '')
+      .map((w) => {
+        if (/^\s+$/.test(w)) return { type: 'space', text: w };
+        const m = w.match(/^([^A-Za-z0-9'’]*)([A-Za-z0-9'’]*)([^A-Za-z0-9'’]*)$/);
+        const core = m ? m[2] : w;
+        const norm = normWord(core);
+        // 괄호 속 숫자 힌트나 기능어(the/a/is...)는 채점 대상이 아님
+        const isKey = !!core && !!norm && !STOPWORDS.has(norm) && !/^\d+$/.test(norm);
+        const matched = isKey ? tokenMatches(norm, spokenToks, spokenConcat) : false;
+        return { type: 'word', text: w, isKey, matched, norm, core };
+      })
+  );
+  const missed = [];
+  lines.forEach((line) =>
+    line.forEach((s) => {
+      if (s.type === 'word' && s.isKey && !s.matched && !missed.some((x) => x.norm === s.norm)) {
+        missed.push({ norm: s.norm, core: s.core });
+      }
+    })
+  );
+  return { lines, missed };
 };
 
 // 2단원 사물: 누가 봐도 알아보는 직접 그린 SVG 일러스트 (이모지보다 선명·일관)
@@ -522,6 +598,16 @@ export default function App() {
   const [writingCellIds, setWritingCellIds] = useState(() => new Set()); // 쓰기 활동 대상 칸 id 집합
   const [attemptCount, setAttemptCount] = useState(0); // 말하기 시도 횟수(3번 후 자동 통과)
 
+  // --- 학습 기록/복습 ---
+  const [earnedStars, setEarnedStars] = useState(() => new Set()); // 이번 게임에서 맞힌 칸 id
+  const [scorePts, setScorePts] = useState(0); // 이번 게임 점수(한 번에 맞힐수록 높음)
+  const [reviewList, setReviewList] = useState([]); // 이번 게임에서 틀린 문장(복습 대상)
+  const [progress, setProgress] = useState(() => loadProgress()); // 누적 별·최고점·오답노트
+  const [reviewDeck, setReviewDeck] = useState(null); // 복습 카드 열림: {cells, idx, title}
+  const [wordFeedback, setWordFeedback] = useState(null); // 발음 피드백: 단어별 맞춤/놓침
+  const finishedSavedRef = useRef(false); // 게임 종료 시 기록 저장을 한 번만
+  const bestBeforeRef = useRef(0); // 이번 게임 시작 전의 최고 점수(성적표 비교용)
+
   const [currentTask, setCurrentTask] = useState(null);
   const [isListening, setIsListening] = useState(false);
   const [spokenText, setSpokenText] = useState('');
@@ -536,6 +622,30 @@ export default function App() {
   useEffect(() => {
     currentTaskRef.current = currentTask;
   }, [currentTask]);
+
+  // 게임이 끝나면 누적 별·최고점·오답노트를 한 번만 저장한다
+  useEffect(() => {
+    if (gameState === 'finished' && !finishedSavedRef.current) {
+      finishedSavedRef.current = true;
+      setProgress((prev) => {
+        const noteMap = new Map(prev.wrongNote.map((n) => [n.key, n]));
+        reviewList.forEach((c) => noteMap.set(c.answer, toNote(c)));
+        // 이번 게임에서 맞힌 문장은 오답노트에서 빼준다
+        earnedStars.forEach((id) => {
+          const cell = board.find((b) => b.id === id);
+          if (cell && cell.answer) noteMap.delete(cell.answer);
+        });
+        const next = {
+          totalStars: prev.totalStars + earnedStars.size,
+          bestScore: Math.max(prev.bestScore, scorePts),
+          wrongNote: [...noteMap.values()].slice(-60), // 최근 60문장까지만 보관
+        };
+        saveProgress(next);
+        return next;
+      });
+    }
+    if (gameState !== 'finished') finishedSavedRef.current = false;
+  }, [gameState]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const speakText = (text, rate = 0.8) => {
     if ('speechSynthesis' in window) {
@@ -715,6 +825,7 @@ export default function App() {
 
     if (cell.type === 'finish') {
       setIsMoving(false);
+      bestBeforeRef.current = progress.bestScore; // 이번 게임 전의 최고점을 성적표 표시용으로 고정
       setGameState('finished');
       return;
     }
@@ -781,6 +892,7 @@ export default function App() {
     setGameState('speaking');
     setSpokenText('');
     setFeedback('');
+    setWordFeedback(null);
     setAttemptCount(0);
 
     setCurrentTask({
@@ -854,6 +966,7 @@ export default function App() {
     try {
       setSpokenText('');
       setFeedback('');
+      setWordFeedback(null);
       isListeningRef.current = true;
       setIsListening(true);
       recognition.start();
@@ -878,8 +991,17 @@ export default function App() {
 
     const isCorrect = required.length > 0 && matchAggregate(list, required);
 
+    // 단어별 발음 피드백(맞춘/놓친 핵심 단어) 계산해서 화면에 보여준다
+    setWordFeedback(analyzeSpoken(list, task));
+
     if (isCorrect) {
-      setFeedback('Excellent! 정답입니다! 🎉 (AI 턴으로 넘어갑니다)');
+      // 한 번에 맞히면 ⭐3, 두 번째 2, 세 번째 1점
+      const gained = Math.max(1, 3 - attemptCount);
+      const id = task.cell.id;
+      setEarnedStars((s) => { const n = new Set(s); n.add(id); return n; });
+      setScorePts((p) => p + gained);
+      setReviewList((r) => r.filter((c) => c.id !== id)); // 이제 맞혔으니 복습 목록에서 제거
+      setFeedback(`Excellent! 정답입니다! 🎉 +${gained}점`);
       speakText('Excellent!');
       setTimeout(() => {
         setGameState('playing');
@@ -892,6 +1014,8 @@ export default function App() {
     setAttemptCount((c) => {
       const next = c + 1;
       if (next >= 3) {
+        // 끝내 못 맞힌 문장은 복습 목록에 담는다(중복 방지)
+        setReviewList((r) => (r.some((c2) => c2.id === task.cell.id) ? r : [...r, task.cell]));
         setFeedback('정말 잘했어요! 다음 차례로 넘어갈게요 🌟');
         speakText('Great job!');
         setTimeout(() => {
@@ -1026,6 +1150,11 @@ export default function App() {
     setBoardWritingMode(false);
     setWritingCellIds(new Set());
     setAttemptCount(0);
+    setEarnedStars(new Set());
+    setScorePts(0);
+    setReviewList([]);
+    setReviewDeck(null);
+    setWordFeedback(null);
   };
 
   const toggleBoardWriting = () => {
@@ -1210,10 +1339,27 @@ export default function App() {
       )}
 
       {gameState === 'lobby' && (
-        <div className="w-full max-w-5xl bg-white/95 p-4 rounded-2xl shadow-md mb-4 text-center border-4 border-emerald-400 z-10 animate-pulse">
-          <h2 className="text-xl md:text-2xl font-black text-emerald-700">
-            💡 그림을 클릭하면 질문과 대답 문장이 나와요. 듣고 따라 읽고 공책에 써보며 연습해봅시다!
-          </h2>
+        <div className="w-full max-w-5xl mb-4 z-10 space-y-3">
+          <div className="bg-white/95 p-4 rounded-2xl shadow-md text-center border-4 border-emerald-400 animate-pulse">
+            <h2 className="text-xl md:text-2xl font-black text-emerald-700">
+              💡 그림을 클릭하면 질문과 대답 문장이 나와요. 듣고 따라 읽고 공책에 써보며 연습해봅시다!
+            </h2>
+          </div>
+          <div className="bg-white/95 p-3 rounded-2xl shadow-md border-4 border-amber-300 flex flex-wrap items-center justify-center gap-3 md:gap-5">
+            <span className="text-base md:text-lg font-black text-amber-700 bg-amber-50 px-4 py-2 rounded-xl border-2 border-amber-200">
+              ⭐ 지금까지 모은 별 <span className="text-amber-900">{progress.totalStars}</span>
+            </span>
+            <span className="text-base md:text-lg font-black text-rose-600 bg-rose-50 px-4 py-2 rounded-xl border-2 border-rose-200">
+              🏅 최고 점수 <span className="text-rose-800">{progress.bestScore}</span>
+            </span>
+            <button
+              onClick={() => progress.wrongNote.length && setReviewDeck({ cells: progress.wrongNote, idx: 0, title: '복습 노트', fromNote: true })}
+              disabled={!progress.wrongNote.length}
+              className={`text-base md:text-lg font-black px-4 py-2 rounded-xl border-2 transition-all ${progress.wrongNote.length ? 'text-violet-700 bg-violet-50 border-violet-300 hover:bg-violet-100 shadow-[0_3px_0_0_rgba(124,58,237,0.5)] active:shadow-none active:translate-y-0.5' : 'text-gray-400 bg-gray-50 border-gray-200 cursor-not-allowed'}`}
+            >
+              📒 복습 노트 ({progress.wrongNote.length})
+            </button>
+          </div>
         </div>
       )}
 
@@ -1231,9 +1377,12 @@ export default function App() {
             )}
           </div>
 
-          <div className="w-1/3 flex justify-center">
+          <div className="w-1/3 flex flex-col items-center gap-1">
+            <div className="text-sm md:text-base bg-amber-100 text-amber-800 border-2 border-amber-300 px-3 py-1 rounded-xl font-black shadow-sm whitespace-nowrap">
+              ⭐ {earnedStars.size} · {scorePts}점
+            </div>
             {diceResult && !showDicePopup && (
-              <div className="text-lg bg-emerald-100 text-emerald-900 border-2 border-emerald-300 px-6 py-2 rounded-xl font-black shadow-sm transition-all">
+              <div className="text-lg bg-emerald-100 text-emerald-900 border-2 border-emerald-300 px-6 py-1 rounded-xl font-black shadow-sm transition-all">
                 {diceResult}
               </div>
             )}
@@ -1350,6 +1499,11 @@ export default function App() {
                   <div className="absolute top-2 right-2 text-sm bg-gray-200/50 rounded-full w-6 h-6 flex items-center justify-center opacity-40 hover:opacity-100 hover:bg-emerald-100 transition-all">
                     🔊
                   </div>
+                  {earnedStars.has(idx) && (
+                    <div className="absolute top-1 left-1 z-30 text-2xl md:text-3xl drop-shadow-[0_2px_2px_rgba(0,0,0,0.3)]" title="맞힌 칸!">
+                      ⭐
+                    </div>
+                  )}
                   <CardVisual
                     cell={cell}
                     scale="sm"
@@ -1870,6 +2024,46 @@ export default function App() {
                   {feedback}
                 </div>
               )}
+
+              {wordFeedback && (
+                <div className="mt-4 bg-slate-50 border-2 border-slate-200 rounded-2xl p-4 text-left">
+                  <p className="text-xs font-black text-slate-500 uppercase tracking-wide mb-2">
+                    🗣️ 내 발음 확인 <span className="text-green-600">초록=잘했어요</span> · <span className="text-rose-500">빨강=다시</span>
+                  </p>
+                  {wordFeedback.lines.map((line, li) => (
+                    <p key={li} className="text-2xl md:text-3xl font-black leading-snug">
+                      {line.map((s, si) => {
+                        if (s.type === 'space') return <span key={si}>{s.text}</span>;
+                        if (!s.isKey) return <span key={si} className="text-slate-400">{s.text}</span>;
+                        return (
+                          <span
+                            key={si}
+                            onClick={() => speakText(s.core)}
+                            title="눌러서 듣기"
+                            className={`cursor-pointer rounded px-1 ${s.matched ? 'text-green-700 bg-green-100' : 'text-rose-600 bg-rose-100 underline decoration-wavy decoration-rose-400'}`}
+                          >
+                            {s.text}
+                          </span>
+                        );
+                      })}
+                    </p>
+                  ))}
+                  {wordFeedback.missed.length > 0 && (
+                    <div className="mt-3 flex flex-wrap items-center gap-2">
+                      <span className="text-sm font-black text-rose-600">다시 말해볼까요?</span>
+                      {wordFeedback.missed.map((m, i) => (
+                        <button
+                          key={i}
+                          onClick={() => speakText(m.core)}
+                          className="text-base font-black text-white bg-rose-400 hover:bg-rose-500 px-3 py-1 rounded-full shadow-sm transition-colors"
+                        >
+                          🔊 {m.core}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             <div className="flex justify-end pt-2">
@@ -1919,21 +2113,136 @@ export default function App() {
 
       {gameState === 'finished' && (
         <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4 backdrop-blur-sm">
-          <div className="bg-white rounded-[2rem] p-10 max-w-md w-full text-center shadow-2xl border-8 border-amber-400">
-            <div className="text-8xl mb-6 animate-bounce">🏆</div>
-            <h2 className="text-4xl font-black mb-2 text-transparent bg-clip-text bg-gradient-to-r from-amber-500 to-rose-500">
+          <div className="bg-white rounded-[2rem] p-8 md:p-10 max-w-md w-full text-center shadow-2xl border-8 border-amber-400">
+            <div className="text-7xl mb-3 animate-bounce">🏆</div>
+            <h2 className="text-3xl md:text-4xl font-black mb-2 text-transparent bg-clip-text bg-gradient-to-r from-amber-500 to-rose-500">
               {playerPos >= board.length - 1 ? '나의 승리!' : 'AI의 승리!'}
             </h2>
-            <p className="text-lg font-bold text-slate-500 mb-8">정말 멋진 게임이었어요!</p>
+            <p className="text-base font-bold text-slate-500 mb-5">오늘의 성적표예요 📋</p>
+
+            <div className="grid grid-cols-2 gap-3 mb-5">
+              <div className="bg-amber-50 border-2 border-amber-200 rounded-2xl p-3">
+                <div className="text-3xl font-black text-amber-600">⭐ {earnedStars.size}</div>
+                <div className="text-xs font-bold text-amber-700 mt-1">맞힌 문장</div>
+              </div>
+              <div className="bg-rose-50 border-2 border-rose-200 rounded-2xl p-3">
+                <div className="text-3xl font-black text-rose-600">{scorePts}점</div>
+                <div className="text-xs font-bold text-rose-700 mt-1">
+                  {scorePts > bestBeforeRef.current ? '🎉 최고 기록!' : `최고 ${bestBeforeRef.current}점`}
+                </div>
+              </div>
+            </div>
+
+            {reviewList.length > 0 ? (
+              <button
+                onClick={() => setReviewDeck({ cells: reviewList, idx: 0, title: '이번 판 복습' })}
+                className="w-full py-3 mb-3 bg-violet-500 hover:bg-violet-400 text-white rounded-2xl font-black text-lg transition-transform border-b-4 border-violet-700 active:border-b-0 active:translate-y-1"
+              >
+                📒 틀린 {reviewList.length}문장 복습하기
+              </button>
+            ) : (
+              <p className="text-sm font-bold text-emerald-600 mb-3 bg-emerald-50 rounded-xl py-2 border-2 border-emerald-200">
+                🌟 틀린 문장이 없어요! 완벽해요!
+              </p>
+            )}
+
             <button
               onClick={resetGame}
-              className="w-full py-4 bg-amber-500 hover:bg-amber-400 text-white rounded-2xl font-black text-2xl transition-transform border-b-8 border-amber-600 active:border-b-0 active:translate-y-2"
+              className="w-full py-3 bg-amber-500 hover:bg-amber-400 text-white rounded-2xl font-black text-xl transition-transform border-b-4 border-amber-600 active:border-b-0 active:translate-y-1"
             >
               다시 게임하기 🔄
             </button>
           </div>
         </div>
       )}
+
+      {reviewDeck && reviewDeck.cells.length > 0 && (() => {
+        const total = reviewDeck.cells.length;
+        const idx = Math.min(reviewDeck.idx, total - 1);
+        const c = reviewDeck.cells[idx];
+        const go = (d) => setReviewDeck((r) => ({ ...r, idx: Math.max(0, Math.min(total - 1, r.idx + d)) }));
+        return (
+          <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-[90] p-4 backdrop-blur-sm">
+            <div className="bg-white rounded-[2rem] p-6 md:p-8 max-w-md w-full text-center shadow-2xl border-8 border-violet-400 relative">
+              <button
+                onClick={() => setReviewDeck(null)}
+                className="absolute top-3 right-4 text-slate-400 hover:text-slate-700 text-2xl font-black"
+              >
+                ✕
+              </button>
+              <div className="flex items-center justify-center gap-2 mb-3">
+                <span className="text-lg font-black text-violet-700">📒 {reviewDeck.title}</span>
+                <span className="text-sm font-black text-white bg-violet-400 px-2 py-0.5 rounded-full">{idx + 1} / {total}</span>
+              </div>
+
+              <div className="flex flex-col items-center mb-4 bg-violet-50 rounded-3xl p-5 border-2 border-violet-100">
+                <CardVisual
+                  cell={c}
+                  scale="lg"
+                  countBoxClass="w-44 h-28 mb-2 px-1"
+                  imgClass="w-28 h-28 object-contain drop-shadow-md mb-2"
+                  emojiClass="text-7xl drop-shadow-md mb-2"
+                />
+                <span className={`text-xs font-black px-3 py-1 rounded-xl border-2 mb-3 ${UNIT_COLORS[c.unit] || 'text-violet-700 bg-white border-violet-200'}`}>
+                  {c.unit}
+                </span>
+                {c.single ? (
+                  <p className="text-2xl md:text-3xl font-black text-slate-800 leading-snug">
+                    <ClickableWords text={c.answer} onWord={(w) => { speakText(w); setWordHint({ word: w, meaning: lookupMeaning(w) }); }} />
+                  </p>
+                ) : (
+                  <div className="space-y-2 w-full">
+                    <p className="text-lg md:text-xl font-black text-blue-700">
+                      <ClickableWords text={c.question} onWord={(w) => { speakText(w); setWordHint({ word: w, meaning: lookupMeaning(w) }); }} />
+                    </p>
+                    <p className="text-xl md:text-2xl font-black text-amber-700">
+                      <ClickableWords text={c.answer} onWord={(w) => { speakText(w); setWordHint({ word: w, meaning: lookupMeaning(w) }); }} />
+                    </p>
+                  </div>
+                )}
+                {wordHint && (
+                  <div className="mt-2 bg-emerald-50 border-2 border-emerald-200 rounded-xl px-3 py-1.5 flex items-baseline gap-2">
+                    <span className="text-base font-black text-emerald-800">🔤 {wordHint.word}</span>
+                    <span className="text-sm font-bold text-emerald-700">{wordHint.meaning ? `· ${wordHint.meaning}` : '· (발음만)'}</span>
+                  </div>
+                )}
+              </div>
+
+              <button
+                onClick={() => speakText(c.single ? c.answer : `${c.question} ... ${c.answer}`)}
+                className="mb-4 px-5 py-2 bg-emerald-500 hover:bg-emerald-400 text-white rounded-full font-black shadow-[0_4px_0_0_rgba(5,150,105,1)] active:shadow-none active:translate-y-1 transition-all"
+              >
+                🔊 듣기
+              </button>
+
+              <div className="flex items-center justify-between gap-2">
+                <button
+                  onClick={() => go(-1)}
+                  disabled={idx === 0}
+                  className={`px-5 py-2 rounded-xl font-black ${idx === 0 ? 'bg-gray-100 text-gray-300' : 'bg-violet-100 text-violet-700 hover:bg-violet-200'}`}
+                >
+                  ← 이전
+                </button>
+                {idx < total - 1 ? (
+                  <button
+                    onClick={() => go(1)}
+                    className="px-5 py-2 rounded-xl font-black bg-violet-500 text-white hover:bg-violet-400"
+                  >
+                    다음 →
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => setReviewDeck(null)}
+                    className="px-5 py-2 rounded-xl font-black bg-emerald-500 text-white hover:bg-emerald-400"
+                  >
+                    복습 끝! ✅
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
