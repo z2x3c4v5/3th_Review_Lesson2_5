@@ -101,14 +101,41 @@ const shuffle = (arr) => {
   return a;
 };
 
+// --- 고정(결정론적) 난수: 누가 접속해도 보드·개수·쓰기칸이 똑같이 나오게 한다 ---
+// (주사위/가위바위보 같은 실제 게임 요소는 그대로 랜덤을 씀)
+const BOARD_SEED = 20250903;
+const makeRng = (seed) => {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+};
+const hashStr = (s) => {
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+};
+const shuffleWith = (arr, rand) => {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+};
+
 // 한 단원에서 n개를 뽑는다. 표현이 n개보다 많으면 무작위로 n개를 뽑고,
 // 적으면 모든 표현을 한 번씩 쓴 뒤 무작위로 반복해 n개를 채운다.
-const pickForUnit = (pool, n) => {
-  const result = shuffle(pool);
+const pickForUnit = (pool, n, rand) => {
+  const result = shuffleWith(pool, rand);
   while (result.length < n) {
-    result.push(pool[Math.floor(Math.random() * pool.length)]);
+    result.push(pool[Math.floor(rand() * pool.length)]);
   }
-  return shuffle(result.slice(0, n));
+  return shuffleWith(result.slice(0, n), rand);
 };
 
 // 매 게임마다 (선택한 단원의) 표현을 일반칸에 균등 배분해 보드를 생성한다.
@@ -119,14 +146,16 @@ const buildBoard = (selectedUnits) => {
     ? selectedUnits.filter((u) => UNIT_POOLS[u])
     : ALL_UNITS);
   const list = units.length ? units : ALL_UNITS;
+  // 선택 단원 조합마다 고정된 시드 → 같은 선택이면 누구에게나 똑같은 보드
+  const rand = makeRng(BOARD_SEED ^ hashStr(list.join('|')));
   const per = Math.floor(CONTENT_CELL_COUNT / list.length);
   const extra = CONTENT_CELL_COUNT - per * list.length; // 남는 칸은 앞 단원부터 한 칸씩 더
   const picked = [];
   list.forEach((unit, i) => {
     const n = per + (i < extra ? 1 : 0);
-    pickForUnit(UNIT_POOLS[unit], n).forEach((item) => picked.push({ ...item, unit }));
+    pickForUnit(UNIT_POOLS[unit], n, rand).forEach((item) => picked.push({ ...item, unit }));
   });
-  const contentQueue = shuffle(picked);
+  const contentQueue = shuffleWith(picked, rand);
 
   let qi = 0;
   return BOARD_LAYOUT.map((layout, id) => {
@@ -136,7 +165,7 @@ const buildBoard = (selectedUnits) => {
       // 4단원: noun(동물)만 있으면 1~10 숫자를 무작위로 붙여 대답을 만들고,
       // 그 숫자(count)만큼 동물 그림을 보여주도록 cell에 저장한다
       if (!item.answer && item.noun) {
-        const n = Math.floor(Math.random() * NUMBER_WORDS.length) + 1;
+        const n = Math.floor(rand() * NUMBER_WORDS.length) + 1;
         item.count = n;
         // 정답에 영어 철자와 함께 숫자도 괄호로 보여준다: "Seven (7) pigs."
         // 1마리일 때는 단수형으로: "One (1) pig."
@@ -146,7 +175,7 @@ const buildBoard = (selectedUnits) => {
       // 5단원: food(음식)만 있으면 "Yes, I do." / "No, I don't." 를 무작위로 골라
       // 대답을 만들고, 👍/👎 힌트(like)를 함께 저장해 어떤 대답인지 보여준다
       if (!item.answer && item.food) {
-        item.like = Math.random() < 0.5;
+        item.like = rand() < 0.5;
         item.answer = item.like ? 'Yes, I do.' : "No, I don't.";
       }
       return { id, type: 'normal', ...item };
@@ -558,21 +587,25 @@ const shuffleArr = (arr) => {
   return a;
 };
 
-const pickRandomBlanks = (segs, count) => {
+// key를 주면 그 문장에 대해 항상 같은 빈칸이 선택된다(누구에게나 동일).
+// key가 없으면(‘새로 섞기’ 버튼) 무작위로 다시 고른다.
+const pickRandomBlanks = (segs, count, key) => {
   const idxs = segs.filter((s) => s.type === 'blank').map((s) => s.idx);
   if (idxs.length <= count) return new Set(idxs);
-  return new Set(shuffleArr(idxs).slice(0, count));
+  const rand = key != null ? makeRng(hashStr(String(key))) : makeRng((Math.random() * 1e9) >>> 0);
+  return new Set(shuffleWith(idxs, rand).slice(0, count));
 };
 
-// 보드에서 단원별 2개씩 (총 8개) 쓰기 활동 칸을 무작위로 뽑음
+// 보드에서 단원별 2개씩 쓰기 활동 칸을 뽑음 — 시드 고정이라 항상 같은 칸이 선택됨
 const pickWritingCells = (board, perUnit = 2) => {
   const units = ['2단원', '3단원', '4단원', '5단원'];
+  const rand = makeRng(BOARD_SEED + 777);
   const out = new Set();
   units.forEach((u) => {
     const ids = board
       .filter((c) => c.type === 'normal' && c.unit === u)
       .map((c) => c.id);
-    shuffleArr(ids).slice(0, perUnit).forEach((id) => out.add(id));
+    shuffleWith(ids, rand).slice(0, perUnit).forEach((id) => out.add(id));
   });
   return out;
 };
@@ -1115,7 +1148,7 @@ export default function App() {
     if (boardWritingMode && writingCellIds.has(cell.id)) {
       // 헤더 쓰기 활동 모드 + 쓰기 대상 칸: 바로 빈칸 채우기로 열기 (자동 음성 X)
       const segs = parseForBlanks(cell.answer);
-      setBlankSet(pickRandomBlanks(segs, 2));
+      setBlankSet(pickRandomBlanks(segs, 2, cell.answer));
       setWriteMode(true);
     } else {
       // 쓰기 모드여도 쓰기 대상 칸이 아니면 평소처럼 듣기/연습 팝업
@@ -1140,7 +1173,7 @@ export default function App() {
   const startWriting = () => {
     setWriteRevealed(false);
     const segs = parseForBlanks(previewCell.answer);
-    setBlankSet(pickRandomBlanks(segs, 2));
+    setBlankSet(pickRandomBlanks(segs, 2, previewCell.answer));
     setWriteMode(true);
   };
 
