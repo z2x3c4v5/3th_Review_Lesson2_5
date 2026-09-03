@@ -130,12 +130,11 @@ const shuffleWith = (arr, rand) => {
 
 // 한 단원에서 n개를 뽑는다. 표현이 n개보다 많으면 무작위로 n개를 뽑고,
 // 적으면 모든 표현을 한 번씩 쓴 뒤 무작위로 반복해 n개를 채운다.
-const pickForUnit = (pool, n, rand) => {
-  const result = shuffleWith(pool, rand);
-  while (result.length < n) {
-    result.push(pool[Math.floor(rand() * pool.length)]);
-  }
-  return shuffleWith(result.slice(0, n), rand);
+// 한 단원에서 n개를 '순서대로' 뽑는다(섞지 않음). pool보다 많이 필요하면 앞에서부터 반복.
+const pickForUnit = (pool, n) => {
+  const out = [];
+  for (let i = 0; i < n; i++) out.push(pool[i % pool.length]);
+  return out;
 };
 
 // 매 게임마다 (선택한 단원의) 표현을 일반칸에 균등 배분해 보드를 생성한다.
@@ -153,9 +152,10 @@ const buildBoard = (selectedUnits) => {
   const picked = [];
   list.forEach((unit, i) => {
     const n = per + (i < extra ? 1 : 0);
-    pickForUnit(UNIT_POOLS[unit], n, rand).forEach((item) => picked.push({ ...item, unit }));
+    pickForUnit(UNIT_POOLS[unit], n).forEach((item) => picked.push({ ...item, unit }));
   });
-  const contentQueue = shuffleWith(picked, rand);
+  // 섞지 않고 단원 순서(2→3→4→5) 그대로 배치 — START부터 차례대로 나옴
+  const contentQueue = picked;
 
   let qi = 0;
   return BOARD_LAYOUT.map((layout, id) => {
